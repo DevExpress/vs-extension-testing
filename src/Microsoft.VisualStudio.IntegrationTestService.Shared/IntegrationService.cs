@@ -50,9 +50,7 @@ namespace Microsoft.VisualStudio.IntegrationTestService
             return (IntegrationService)Activator.GetObject(typeof(IntegrationService), uri);
         }
 
-        public override object InitializeLifetimeService() => null;
-
-        public string Execute(string assemblyFilePath, string typeFullName, string methodName)
+        public string? Execute(string assemblyFilePath, string typeFullName, string methodName)
         {
             var assembly = Assembly.LoadFrom(assemblyFilePath);
             var type = assembly.GetType(typeFullName);
@@ -76,6 +74,12 @@ namespace Microsoft.VisualStudio.IntegrationTestService
             }
 
             return objectUri;
+        }
+
+        // Ensure in-process components live forever
+        public override object? InitializeLifetimeService()
+        {
+            return null;
         }
     }
 }

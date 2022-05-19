@@ -8,8 +8,9 @@ namespace Xunit.Harness
     using System.Linq;
     using System.Runtime.InteropServices;
     using System.Threading.Tasks;
+    using Windows.Win32;
     using DTE = EnvDTE.DTE;
-    using IMoniker = Microsoft.VisualStudio.OLE.Interop.IMoniker;
+    using IMoniker = Windows.Win32.System.Com.IMoniker;
 
     /// <summary>
     /// Provides some helper functions used by the other classes in the project.
@@ -39,36 +40,36 @@ namespace Xunit.Harness
         }
 
         /// <summary>Locates the DTE object for the specified process.</summary>
-        public static DTE TryLocateDteForProcess(Process process)
+        public static DTE? TryLocateDteForProcess(Process process)
         {
-            object dte = null;
-            var monikers = new IMoniker[1];
+            object? dte = null;
+            var monikers = new IMoniker?[1];
 
-            NativeMethods.GetRunningObjectTable(0, out var runningObjectTable);
+            PInvoke.GetRunningObjectTable(0, out var runningObjectTable);
             runningObjectTable.EnumRunning(out var enumMoniker);
-            NativeMethods.CreateBindCtx(0, out var bindContext);
+            PInvoke.CreateBindCtx(0, out var bindContext);
 
             do
             {
                 monikers[0] = null;
 
-                var hresult = enumMoniker.Next(1, monikers, out var monikersFetched);
+                uint monikersFetched;
+                unsafe
+                {
+                    enumMoniker.Next(1, monikers, &monikersFetched);
+                }
 
-                if (hresult == VSConstants.S_FALSE)
+                if (monikersFetched == 0)
                 {
                     // There's nothing further to enumerate, so fail
                     return null;
                 }
-                else
-                {
-                    Marshal.ThrowExceptionForHR(hresult);
-                }
 
-                var moniker = monikers[0];
+                var moniker = monikers[0]!;
                 moniker.GetDisplayName(bindContext, null, out var fullDisplayName);
 
                 // FullDisplayName will look something like: <ProgID>:<ProccessId>
-                var displayNameParts = fullDisplayName.Split(':');
+                var displayNameParts = fullDisplayName.ToString().Split(':');
                 if (!int.TryParse(displayNameParts.Last(), out var displayNameProcessId))
                 {
                     continue;
@@ -85,7 +86,7 @@ namespace Xunit.Harness
             return (DTE)dte;
         }
 
-        public static async Task<T> WaitForNotNullAsync<T>(Func<T> action)
+        public static async Task<T> WaitForNotNullAsync<T>(Func<T?> action)
             where T : class
         {
             var result = action();

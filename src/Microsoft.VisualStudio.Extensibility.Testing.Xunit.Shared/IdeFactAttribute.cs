@@ -8,12 +8,14 @@ namespace Xunit
 
     [AttributeUsage(AttributeTargets.Method, AllowMultiple = false)]
     [XunitTestCaseDiscoverer("Xunit.Threading.IdeFactDiscoverer", "Microsoft.VisualStudio.Extensibility.Testing.Xunit")]
-    public class IdeFactAttribute : FactAttribute
+    public class IdeFactAttribute : FactAttribute, IIdeSettingsAttribute
     {
         public IdeFactAttribute()
         {
-            MinVersion = VisualStudioVersion.VS2012;
-            MaxVersion = VisualStudioVersion.VS2022;
+            MinVersion = VisualStudioVersion.Unspecified;
+            MaxVersion = VisualStudioVersion.Unspecified;
+            RootSuffix = null;
+            MaxAttempts = 0;
         }
 
         public VisualStudioVersion MinVersion
@@ -23,6 +25,18 @@ namespace Xunit
         }
 
         public VisualStudioVersion MaxVersion
+        {
+            get;
+            set;
+        }
+
+        public string? RootSuffix
+        {
+            get;
+            set;
+        }
+
+        public int MaxAttempts
         {
             get;
             set;

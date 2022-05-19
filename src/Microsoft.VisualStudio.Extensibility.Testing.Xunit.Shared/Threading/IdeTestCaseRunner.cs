@@ -16,19 +16,19 @@ namespace Xunit.Threading
     {
         public IdeTestCaseRunner(
             WpfTestSharedData sharedData,
-            VisualStudioVersion visualStudioVersion,
+            VisualStudioInstanceKey visualStudioInstanceKey,
             IXunitTestCase testCase,
             string displayName,
             string skipReason,
-            object[] constructorArguments,
-            object[] testMethodArguments,
+            object?[] constructorArguments,
+            object?[]? testMethodArguments,
             IMessageBus messageBus,
             ExceptionAggregator aggregator,
             CancellationTokenSource cancellationTokenSource)
             : base(testCase, displayName, skipReason, constructorArguments, testMethodArguments, messageBus, aggregator, cancellationTokenSource)
         {
             SharedData = sharedData;
-            VisualStudioVersion = visualStudioVersion;
+            VisualStudioInstanceKey = visualStudioInstanceKey;
         }
 
         public WpfTestSharedData SharedData
@@ -36,12 +36,12 @@ namespace Xunit.Threading
             get;
         }
 
-        public VisualStudioVersion VisualStudioVersion
+        public VisualStudioInstanceKey VisualStudioInstanceKey
         {
             get;
         }
 
-        protected override XunitTestRunner CreateTestRunner(ITest test, IMessageBus messageBus, Type testClass, object[] constructorArguments, MethodInfo testMethod, object[] testMethodArguments, string skipReason, IReadOnlyList<BeforeAfterTestAttribute> beforeAfterAttributes, ExceptionAggregator aggregator, CancellationTokenSource cancellationTokenSource)
+        protected override XunitTestRunner CreateTestRunner(ITest test, IMessageBus messageBus, Type testClass, object?[] constructorArguments, MethodInfo testMethod, object?[]? testMethodArguments, string skipReason, IReadOnlyList<BeforeAfterTestAttribute> beforeAfterAttributes, ExceptionAggregator aggregator, CancellationTokenSource cancellationTokenSource)
         {
             if (Process.GetCurrentProcess().ProcessName == "devenv")
             {

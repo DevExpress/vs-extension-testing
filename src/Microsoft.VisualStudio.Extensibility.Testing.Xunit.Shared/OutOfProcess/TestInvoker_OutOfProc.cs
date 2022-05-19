@@ -4,8 +4,10 @@
 namespace Xunit.OutOfProcess
 {
     using System;
+    using System.Collections.Generic;
     using System.Linq;
     using System.Reflection;
+    using System.Runtime.Remoting;
     using Xunit.Abstractions;
     using Xunit.Harness;
     using Xunit.InProcess;
@@ -38,20 +40,23 @@ namespace Xunit.OutOfProcess
             ITest test,
             IMessageBus messageBus,
             Type testClass,
-            object[] constructorArguments,
+            object?[]? constructorArguments,
             MethodInfo testMethod,
-            object[] testMethodArguments)
+            object?[]? testMethodArguments)
         {
+            using var marshalledObjects = new MarshalledObjects();
             if (constructorArguments != null)
             {
                 if (constructorArguments.OfType<ITestOutputHelper>().Any())
                 {
-                    constructorArguments = (object[])constructorArguments.Clone();
+                    constructorArguments = (object?[])constructorArguments.Clone();
                     for (int i = 0; i < constructorArguments.Length; i++)
                     {
                         if (constructorArguments[i] is ITestOutputHelper testOutputHelper)
                         {
-                            constructorArguments[i] = new TestOutputHelperWrapper(testOutputHelper);
+                            var wrapper = new TestOutputHelperWrapper(testOutputHelper);
+                            constructorArguments[i] = wrapper;
+                            marshalledObjects.Add(wrapper);
                         }
                     }
                 }
@@ -80,12 +85,16 @@ namespace Xunit.OutOfProcess
                 _testOutputHelper.WriteLine(message);
             }
 
-            public void WriteLine(string format, params object[] args)
+            public void WriteLine(string format, params object?[] args)
             {
                 _testOutputHelper.WriteLine(format, args);
             }
 
-            public override object InitializeLifetimeService() => null;
+            // The life of this object is managed explicitly
+            public override object? InitializeLifetimeService()
+            {
+                return null;
+            }
         }
     }
 }

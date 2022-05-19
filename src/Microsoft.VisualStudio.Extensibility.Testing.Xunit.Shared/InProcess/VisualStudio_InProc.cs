@@ -4,10 +4,16 @@
 namespace Xunit.InProcess
 {
     using System;
+    using System.Collections.Generic;
+    using System.Collections.Immutable;
     using System.Diagnostics;
     using System.Reflection;
     using System.Runtime.InteropServices;
     using System.Text;
+    using Microsoft.VisualStudio.Shell.Interop;
+    using Windows.Win32;
+    using Windows.Win32.Foundation;
+    using Windows.Win32.UI.WindowsAndMessaging;
     using Xunit.Harness;
     using File = System.IO.File;
     using IVsUIShell = Microsoft.VisualStudio.Shell.Interop.IVsUIShell;
@@ -59,16 +65,24 @@ namespace Xunit.InProcess
             {
                 var dte = GetDTE();
 
-                var activeVisualStudioWindow = (IntPtr)dte.ActiveWindow.HWnd;
+                nint activeWindow = dte.ActiveWindow.HWnd;
+                var activeVisualStudioWindow = (HWND)activeWindow;
                 Debug.WriteLine($"DTE.ActiveWindow.HWnd = {activeVisualStudioWindow}");
-
-                if (activeVisualStudioWindow == IntPtr.Zero)
+                if (activeVisualStudioWindow != IntPtr.Zero)
                 {
-                    activeVisualStudioWindow = (IntPtr)dte.MainWindow.HWnd;
-                    Debug.WriteLine($"DTE.MainWindow.HWnd = {activeVisualStudioWindow}");
+                    if (TrySetForegroundWindow(activeVisualStudioWindow))
+                    {
+                        return;
+                    }
                 }
 
-                SetForegroundWindow(activeVisualStudioWindow);
+                nint mainWindow = dte.MainWindow.HWnd;
+                activeVisualStudioWindow = (HWND)mainWindow;
+                Debug.WriteLine($"DTE.MainWindow.HWnd = {activeVisualStudioWindow}");
+                if (!TrySetForegroundWindow(activeVisualStudioWindow))
+                {
+                    throw new InvalidOperationException("Failed to set the foreground window.");
+                }
             });
         }
 
@@ -77,7 +91,7 @@ namespace Xunit.InProcess
         /// This is always turned on and has a rolling buffer of the last 100 entries, and the first 10 entries, which have general configuration information.
         /// </summary>
         /// <returns>null if no data; error string if error; log info if valid data.</returns>
-        internal static string GetInMemoryActivityLog()
+        internal static string? GetInMemoryActivityLog()
         {
             return InvokeOnUIThread(() =>
             {
@@ -107,6 +121,75 @@ namespace Xunit.InProcess
             });
         }
 
+        internal static string GetIdeState(ImmutableList<KeyValuePair<string, Func<string>>> customIdeStateCollectors)
+        {
+            return InvokeOnUIThread(() =>
+            {
+                var stateBuilder = new StringBuilder();
+
+                /*
+                 * Solution
+                 */
+                if (GlobalServiceProvider.ServiceProvider.GetService(typeof(SVsSolution)) is IVsSolution solution
+                    && solution.GetSolutionInfo(out var solutionDirectory, out var solutionFile, out var userOptsFile) == VSConstants.S_OK)
+                {
+                    stateBuilder.AppendLine("Solution:");
+                    stateBuilder.AppendLine($"  Solution Directory: {solutionDirectory}");
+                    stateBuilder.AppendLine($"  Solution File:      {solutionFile}");
+                    stateBuilder.AppendLine($"  User Opts File:     {userOptsFile}");
+                }
+
+                /*
+                 * Error list
+                 */
+                if (GlobalServiceProvider.ServiceProvider.GetService(typeof(SVsTaskList)) is IVsTaskList taskList
+                    && taskList.EnumTaskItems(out var enumTaskItems) == VSConstants.S_OK)
+                {
+                    stateBuilder.AppendLine("Error list:");
+
+                    var index = 0;
+                    var taskItems = new IVsTaskItem[10];
+                    var actual = new uint[1];
+                    while (enumTaskItems.Next((uint)taskItems.Length, taskItems, actual) == VSConstants.S_OK)
+                    {
+                        if (actual[0] == 0)
+                        {
+                            break;
+                        }
+
+                        for (var i = 0; i < actual[0]; i++)
+                        {
+                            var item = taskItems[i];
+                            var text = item.get_Text(out var name) == VSConstants.S_OK ? name : string.Empty;
+                            stateBuilder.AppendLine($"  {++index}: {name}");
+                        }
+                    }
+                }
+
+                /*
+                 * Custom collectors
+                 */
+                foreach (var collector in customIdeStateCollectors)
+                {
+                    stateBuilder.Append(collector.Key).AppendLine(":");
+                    var lines = collector.Value().Replace("\r\n", "\n").Split(new[] { '\n' });
+                    foreach (var line in lines)
+                    {
+                        if (line == string.Empty)
+                        {
+                            stateBuilder.AppendLine();
+                        }
+                        else
+                        {
+                            stateBuilder.Append("  ").AppendLine(line);
+                        }
+                    }
+                }
+
+                return stateBuilder.ToString();
+            });
+        }
+
         public void Quit()
         {
             BeginInvokeOnUIThread(() =>
@@ -119,45 +202,47 @@ namespace Xunit.InProcess
             });
         }
 
-        private static void SetForegroundWindow(IntPtr window)
+        private static bool TrySetForegroundWindow(HWND window)
         {
-            var activeWindow = NativeMethods.GetLastActivePopup(window);
-            activeWindow = NativeMethods.IsWindowVisible(activeWindow) ? activeWindow : window;
-            NativeMethods.SwitchToThisWindow(activeWindow, true);
+            var activeWindow = PInvoke.GetLastActivePopup(window);
+            activeWindow = PInvoke.IsWindowVisible(activeWindow) ? activeWindow : window;
+            PInvoke.SwitchToThisWindow(activeWindow, true);
 
-            if (!NativeMethods.SetForegroundWindow(activeWindow))
+            if (!PInvoke.SetForegroundWindow(activeWindow))
             {
-                if (!NativeMethods.AllocConsole())
+                if (!PInvoke.AllocConsole())
                 {
                     Marshal.ThrowExceptionForHR(Marshal.GetHRForLastWin32Error());
                 }
 
                 try
                 {
-                    var consoleWindow = NativeMethods.GetConsoleWindow();
+                    var consoleWindow = PInvoke.GetConsoleWindow();
                     if (consoleWindow == IntPtr.Zero)
                     {
                         throw new InvalidOperationException("Failed to obtain the console window.");
                     }
 
-                    if (!NativeMethods.SetWindowPos(consoleWindow, IntPtr.Zero, 0, 0, 0, 0, NativeMethods.SWP_NOZORDER))
+                    if (!PInvoke.SetWindowPos(consoleWindow, hWndInsertAfter: (HWND)0, 0, 0, 0, 0, SET_WINDOW_POS_FLAGS.SWP_NOZORDER))
                     {
                         Marshal.ThrowExceptionForHR(Marshal.GetHRForLastWin32Error());
                     }
                 }
                 finally
                 {
-                    if (!NativeMethods.FreeConsole())
+                    if (!PInvoke.FreeConsole())
                     {
                         Marshal.ThrowExceptionForHR(Marshal.GetHRForLastWin32Error());
                     }
                 }
 
-                if (!NativeMethods.SetForegroundWindow(activeWindow))
+                if (!PInvoke.SetForegroundWindow(activeWindow))
                 {
-                    throw new InvalidOperationException("Failed to set the foreground window.");
+                    return false;
                 }
             }
+
+            return true;
         }
     }
 }

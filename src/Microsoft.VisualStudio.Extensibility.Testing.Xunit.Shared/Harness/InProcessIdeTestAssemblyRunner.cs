@@ -21,7 +21,15 @@ namespace Xunit.Harness
             {
                 if (testCase is IdeTestCase ideTestCase)
                 {
-                    return new IdeTestCase(diagnosticMessageSink, ideTestCase.DefaultMethodDisplay, ideTestCase.DefaultMethodDisplayOptions, ideTestCase.TestMethod, ideTestCase.VisualStudioVersion, ideTestCase.TestMethodArguments);
+                    return new IdeTestCase(diagnosticMessageSink, ideTestCase.DefaultMethodDisplay, ideTestCase.DefaultMethodDisplayOptions, ideTestCase.TestMethod, ideTestCase.VisualStudioInstanceKey, ideTestCase.TestMethodArguments);
+                }
+                else if (testCase is IdeTheoryTestCase ideTheoryTestCase)
+                {
+                    return new IdeTheoryTestCase(diagnosticMessageSink, ideTheoryTestCase.DefaultMethodDisplay, ideTheoryTestCase.DefaultMethodDisplayOptions, ideTheoryTestCase.TestMethod, ideTheoryTestCase.VisualStudioInstanceKey, ideTheoryTestCase.TestMethodArguments);
+                }
+                else if (testCase is IdeInstanceTestCase ideInstanceTestCase)
+                {
+                    return new IdeInstanceTestCase(diagnosticMessageSink, ideInstanceTestCase.DefaultMethodDisplay, ideInstanceTestCase.DefaultMethodDisplayOptions, ideInstanceTestCase.TestMethod, ideInstanceTestCase.VisualStudioInstanceKey, ideInstanceTestCase.TestMethodArguments);
                 }
 
                 return testCase;
@@ -47,9 +55,9 @@ namespace Xunit.Harness
             GC.SuppressFinalize(this);
         }
 
-        public override object InitializeLifetimeService()
+        // The life of this object is managed explicitly
+        public override object? InitializeLifetimeService()
         {
-            // This object can live forever
             return null;
         }
 

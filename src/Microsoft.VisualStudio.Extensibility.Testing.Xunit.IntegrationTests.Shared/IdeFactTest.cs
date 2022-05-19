@@ -3,6 +3,7 @@
 
 namespace Microsoft.VisualStudio.Extensibility.Testing.Xunit.IntegrationTests
 {
+    using System;
     using System.Diagnostics;
     using System.Threading;
     using System.Threading.Tasks;
@@ -18,10 +19,10 @@ namespace Microsoft.VisualStudio.Extensibility.Testing.Xunit.IntegrationTests
     public class IdeFactTest : AbstractIdeIntegrationTest
     {
         [IdeFact]
-        public void TestOpenAndCloseIDE()
+        public async Task TestOpenAndCloseIDE()
         {
             Assert.Equal("devenv", Process.GetCurrentProcess().ProcessName);
-            var dte = (DTE)ServiceProvider.GetService(typeof(_DTE));
+            var dte = await TestServices.Shell.GetRequiredGlobalServiceAsync<_DTE, DTE>(HangMitigatingCancellationToken);
             Assert.NotNull(dte);
         }
 
@@ -68,30 +69,86 @@ namespace Microsoft.VisualStudio.Extensibility.Testing.Xunit.IntegrationTests
         }
 
         [IdeFact(MaxVersion = VisualStudioVersion.VS2012)]
-        public void TestJoinableTaskFactoryProvidedByTest()
+        public async Task TestJoinableTaskFactoryProvidedByTest()
         {
-            var taskSchedulerServiceObject = ServiceProvider.GetService(typeof(SVsTaskSchedulerService));
+            var taskSchedulerServiceObject = await TestServices.Shell.GetRequiredGlobalServiceAsync<SVsTaskSchedulerService, IVsTaskSchedulerService>(HangMitigatingCancellationToken);
             Assert.NotNull(taskSchedulerServiceObject);
-
-            var taskSchedulerService = taskSchedulerServiceObject as IVsTaskSchedulerService;
-            Assert.NotNull(taskSchedulerService);
-
-            var taskSchedulerService2 = taskSchedulerServiceObject as IVsTaskSchedulerService2;
-            Assert.Null(taskSchedulerService2);
+            Assert.Null(taskSchedulerServiceObject as IVsTaskSchedulerService2);
 
             Assert.NotNull(JoinableTaskContext);
         }
 
         [IdeFact(MinVersion = VisualStudioVersion.VS2013)]
-        public void TestJoinableTaskFactoryObtainedFromEnvironment()
+        public async Task TestJoinableTaskFactoryObtainedFromEnvironment()
         {
-            var taskSchedulerServiceObject = ServiceProvider.GetService(typeof(SVsTaskSchedulerService));
+            var taskSchedulerServiceObject = await TestServices.Shell.GetRequiredGlobalServiceAsync<SVsTaskSchedulerService, IVsTaskSchedulerService>(HangMitigatingCancellationToken);
             Assert.NotNull(taskSchedulerServiceObject);
-
             var taskSchedulerService = taskSchedulerServiceObject as IVsTaskSchedulerService2;
             Assert.NotNull(taskSchedulerService);
+            Assert.Same(JoinableTaskContext, taskSchedulerService!.GetAsyncTaskContext());
+        }
 
-            Assert.Same(JoinableTaskContext, taskSchedulerService.GetAsyncTaskContext());
+        /// <summary>
+        /// ⚠️ Running this test locally will reset the setting for the non-experimental instance.
+        /// </summary>
+        [IdeFact(RootSuffix = "")]
+        public async Task TestStandardInstance()
+        {
+            var appCommandLine = await TestServices.Shell.GetRequiredGlobalServiceAsync<SVsAppCommandLine, IVsAppCommandLine>(HangMitigatingCancellationToken);
+
+            Assert.Equal(0, appCommandLine.GetOption("rootSuffix", out var present, out var value));
+            Assert.Equal(0, present);
+            Assert.Null(value);
+
+            Assert.Null(Environment.GetEnvironmentVariable("VSROOTSUFFIX"));
+        }
+
+        [IdeFact]
+        public async Task TestDefaultExperimentalInstance1()
+        {
+            var appCommandLine = await TestServices.Shell.GetRequiredGlobalServiceAsync<SVsAppCommandLine, IVsAppCommandLine>(HangMitigatingCancellationToken);
+
+            Assert.Equal(0, appCommandLine.GetOption("rootSuffix", out var present, out var value));
+            Assert.Equal(1, present);
+            Assert.Equal("Exp", value);
+
+            Assert.Equal("Exp", Environment.GetEnvironmentVariable("VSROOTSUFFIX"));
+        }
+
+        [IdeFact(RootSuffix = null)]
+        public async Task TestDefaultExperimentalInstance2()
+        {
+            var appCommandLine = await TestServices.Shell.GetRequiredGlobalServiceAsync<SVsAppCommandLine, IVsAppCommandLine>(HangMitigatingCancellationToken);
+
+            Assert.Equal(0, appCommandLine.GetOption("rootSuffix", out var present, out var value));
+            Assert.Equal(1, present);
+            Assert.Equal("Exp", value);
+
+            Assert.Equal("Exp", Environment.GetEnvironmentVariable("VSROOTSUFFIX"));
+        }
+
+        [IdeFact(RootSuffix = "Exp")]
+        public async Task TestExperimentalInstance()
+        {
+            var appCommandLine = await TestServices.Shell.GetRequiredGlobalServiceAsync<SVsAppCommandLine, IVsAppCommandLine>(HangMitigatingCancellationToken);
+
+            Assert.Equal(0, appCommandLine.GetOption("rootSuffix", out var present, out var value));
+            Assert.Equal(1, present);
+            Assert.Equal("Exp", value);
+
+            Assert.Equal("Exp", Environment.GetEnvironmentVariable("VSROOTSUFFIX"));
+        }
+
+        [IdeFact(RootSuffix = "RoslynExp")]
+        public async Task TestRoslynExperimentalInstance()
+        {
+            var appCommandLine = await TestServices.Shell.GetRequiredGlobalServiceAsync<SVsAppCommandLine, IVsAppCommandLine>(HangMitigatingCancellationToken);
+
+            Assert.Equal(0, appCommandLine.GetOption("rootSuffix", out var present, out var value));
+            Assert.Equal(1, present);
+            Assert.Equal("RoslynExp", value);
+
+            Assert.Equal("RoslynExp", Environment.GetEnvironmentVariable("VSROOTSUFFIX"));
         }
     }
 }

@@ -5,6 +5,7 @@ namespace Microsoft.VisualStudio.VsixInstaller
 {
     using System;
     using System.Collections.Generic;
+    using System.Diagnostics;
     using System.Linq;
     using System.Reflection;
     using System.Runtime.CompilerServices;
@@ -43,9 +44,21 @@ namespace Microsoft.VisualStudio.VsixInstaller
 
             return;
 
-            Assembly HandleAssemblyResolve(object sender, ResolveEventArgs args)
+            Assembly? HandleAssemblyResolve(object sender, ResolveEventArgs args)
             {
-                string path = Path.Combine(installationPath, @"Common7\IDE\PrivateAssemblies", new AssemblyName(args.Name).Name + ".dll");
+                string path = Path.Combine(installationPath, @"Common7\IDE\PublicAssemblies\Microsoft.VisualStudio.Threading.17.x", new AssemblyName(args.Name).Name + ".dll");
+                if (File.Exists(path))
+                {
+                    return Assembly.LoadFrom(path);
+                }
+
+                path = Path.Combine(installationPath, @"Common7\IDE\PrivateAssemblies\Newtonsoft.Json.13.0.1.0", new AssemblyName(args.Name).Name + ".dll");
+                if (File.Exists(path))
+                {
+                    return Assembly.LoadFrom(path);
+                }
+
+                path = Path.Combine(installationPath, @"Common7\IDE\PrivateAssemblies", new AssemblyName(args.Name).Name + ".dll");
                 if (File.Exists(path))
                 {
                     return Assembly.LoadFrom(path);
@@ -70,6 +83,7 @@ namespace Microsoft.VisualStudio.VsixInstaller
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static void InstallImpl(IEnumerable<string> vsixFiles, string rootSuffix, string installationPath)
         {
+            //Debugger.Launch();
             var vsExeFile = Path.Combine(installationPath, @"Common7\IDE\devenv.exe");
             var settingsManager =
                 string.IsNullOrEmpty(rootSuffix) ?

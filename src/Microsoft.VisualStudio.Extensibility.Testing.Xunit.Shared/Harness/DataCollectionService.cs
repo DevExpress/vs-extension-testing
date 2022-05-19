@@ -4,6 +4,8 @@
 namespace Xunit.Harness
 {
     using System;
+    using System.Collections.Immutable;
+    using System.Diagnostics;
     using System.IO;
     using System.Linq;
     using System.Runtime.CompilerServices;
@@ -11,15 +13,16 @@ namespace Xunit.Harness
     using Xunit.Abstractions;
     using Xunit.Sdk;
 
-    internal static class DataCollectionService
+    public static class DataCollectionService
     {
         private static readonly ConditionalWeakTable<Exception, StrongBox<bool>> LoggedExceptions = new();
+        private static ImmutableList<CustomLoggerData> _customInProcessLoggers = ImmutableList<CustomLoggerData>.Empty;
         private static bool _firstChanceExceptionHandlerInstalled;
 
         [ThreadStatic]
         private static bool _inHandler;
 
-        public static ITest CurrentTest { get; set; }
+        internal static ITest? CurrentTest { get; set; }
 
         private static string CurrentTestName
         {
@@ -30,15 +33,77 @@ namespace Xunit.Harness
                     return "Unknown";
                 }
 
-                var testMethod = CurrentTest.TestCase.TestMethod.Method;
-                var testClass = testMethod.Type.Name;
-                var lastDot = testClass.LastIndexOf('.');
-                testClass = testClass.Substring(lastDot + 1);
-                return $"{testClass}.{testMethod.Name}";
+                return GetTestName(CurrentTest.TestCase);
             }
         }
 
-        public static void InstallFirstChanceExceptionHandler()
+        /// <summary>
+        /// Register a custom logger to collect data in the event of a test failure.
+        /// </summary>
+        /// <remarks>
+        /// <para>The <paramref name="logId"/> and <paramref name="extension"/> should be chosen to avoid conflicts with
+        /// other loggers. Otherwise, it is possible for logs to be overwritten during data collection. Built-in logs
+        /// include:</para>
+        ///
+        /// <list type="table">
+        ///   <listheader>
+        ///     <description><strong>Log ID</strong></description>
+        ///     <description><strong>Extension</strong></description>
+        ///     <description><strong>Purpose</strong></description>
+        ///   </listheader>
+        ///   <item>
+        ///     <description>None</description>
+        ///     <description><c>log</c></description>
+        ///     <description>Exception details</description>
+        ///   </item>
+        ///   <item>
+        ///     <description>None</description>
+        ///     <description><c>png</c></description>
+        ///     <description>Screenshot</description>
+        ///   </item>
+        ///   <item>
+        ///     <description><c>DotNet</c></description>
+        ///     <description><c>log</c></description>
+        ///     <description>.NET errors from the Windows Event Log (filtered to relevant processes)</description>
+        ///   </item>
+        ///   <item>
+        ///     <description><c>Watson</c></description>
+        ///     <description><c>log</c></description>
+        ///     <description>Watson errors from the Windows Event Log (filtered to relevant processes)</description>
+        ///   </item>
+        ///   <item>
+        ///     <description><c>Activity</c></description>
+        ///     <description><c>xml</c></description>
+        ///     <description>The in-memory activity log at the time of failure. This item is only collected when the error is handled by the harness inside the running Visual Studio process.</description>
+        ///   </item>
+        ///   <item>
+        ///     <description><c>IDE</c></description>
+        ///     <description><c>log</c></description>
+        ///     <description>Information about the IDE state at the point of failure. This item is only collected when the error is handled by the harness inside the running Visual Studio process. See <see cref="IdeStateCollector"/>.</description>
+        ///   </item>
+        /// </list>
+        /// </remarks>
+        /// <param name="callback">The callback to invoke to collect log information. The argument to the callback is the fully-qualified file path where the log data should be written.</param>
+        /// <param name="logId">An optional log identifier to include in the resulting file name.</param>
+        /// <param name="extension">The extension to give the resulting file.</param>
+        public static void RegisterCustomLogger(Action<string> callback, string logId, string extension)
+        {
+            ImmutableInterlocked.Update(
+                ref _customInProcessLoggers,
+                (loggers, newLogger) => loggers.Add(newLogger),
+                new CustomLoggerData(callback, logId, extension));
+        }
+
+        internal static string GetTestName(ITestCase testCase)
+        {
+            var testMethod = testCase.TestMethod.Method;
+            var testClass = testMethod.Type.Name;
+            var lastDot = testClass.LastIndexOf('.');
+            testClass = testClass.Substring(lastDot + 1);
+            return $"{testClass}.{testMethod.Name}";
+        }
+
+        internal static void InstallFirstChanceExceptionHandler()
         {
             if (!_firstChanceExceptionHandlerInstalled)
             {
@@ -47,7 +112,7 @@ namespace Xunit.Harness
             }
         }
 
-        public static bool LogAndCatch(Exception ex)
+        internal static bool LogAndCatch(Exception ex)
         {
             try
             {
@@ -61,7 +126,7 @@ namespace Xunit.Harness
             return true;
         }
 
-        public static bool LogAndPropagate(Exception ex)
+        internal static bool LogAndPropagate(Exception ex)
         {
             try
             {
@@ -75,7 +140,7 @@ namespace Xunit.Harness
             return false;
         }
 
-        public static bool TryLog(Exception ex)
+        internal static bool TryLog(Exception ex)
         {
             if (ex is null)
             {
@@ -94,7 +159,7 @@ namespace Xunit.Harness
             return true;
         }
 
-        public static void CaptureFailureState(string testName, Exception ex)
+        internal static void CaptureFailureState(string testName, Exception ex)
         {
             if (_inHandler)
             {
@@ -114,12 +179,19 @@ namespace Xunit.Harness
                 Directory.CreateDirectory(logDir);
 
                 File.WriteAllText(CreateLogFileName(logDir, timestamp, testName, errorId, logId: string.Empty, "log"), ex.ToString());
-
-                ActivityLogCollector.TryWriteActivityLogToFile(CreateLogFileName(logDir, timestamp, testName, errorId, "Activity", "xml"));
+                ScreenshotService.TakeScreenshot(CreateLogFileName(logDir, timestamp, testName, errorId, string.Empty, $"png"));
                 EventLogCollector.TryWriteDotNetEntriesToFile(CreateLogFileName(logDir, timestamp, testName, errorId, "DotNet", "log"));
                 EventLogCollector.TryWriteWatsonEntriesToFile(CreateLogFileName(logDir, timestamp, testName, errorId, "Watson", "log"));
 
-                ScreenshotService.TakeScreenshot(CreateLogFileName(logDir, timestamp, testName, errorId, string.Empty, $"png"));
+                if (Process.GetCurrentProcess().ProcessName == "devenv")
+                {
+                    ActivityLogCollector.TryWriteActivityLogToFile(CreateLogFileName(logDir, timestamp, testName, errorId, "Activity", "xml"));
+                    IdeStateCollector.TryWriteIdeStateToFile(CreateLogFileName(logDir, timestamp, testName, errorId, "IDE", "log"));
+                    foreach (var (callback, logId, extension) in _customInProcessLoggers)
+                    {
+                        callback(CreateLogFileName(logDir, timestamp, testName, errorId, logId, extension));
+                    }
+                }
             }
             finally
             {
@@ -191,5 +263,7 @@ namespace Xunit.Harness
             var assemblyPath = typeof(DataCollectionService).Assembly.Location;
             return Path.GetDirectoryName(assemblyPath);
         }
+
+        internal record struct CustomLoggerData(Action<string> Callback, string LogId, string Extension);
     }
 }

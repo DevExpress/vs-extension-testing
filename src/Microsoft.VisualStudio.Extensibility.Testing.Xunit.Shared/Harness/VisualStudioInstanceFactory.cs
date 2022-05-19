@@ -20,27 +20,26 @@ namespace Xunit.Harness
 
     internal sealed class VisualStudioInstanceFactory : MarshalByRefObject, IDisposable
     {
-        public static readonly string VsLaunchArgs = string.IsNullOrWhiteSpace(Settings.Default.VsRootSuffix) ? string.Empty : $"/rootsuffix {Settings.Default.VsRootSuffix}";
-
         private static readonly Dictionary<Version, Assembly> _installerAssemblies = new Dictionary<Version, Assembly>();
+
+        private readonly bool _leaveRunning;
 
         /// <summary>
         /// The instance that has already been launched by this factory and can be reused.
         /// </summary>
-        private VisualStudioInstance _currentlyRunningInstance;
-        private static HashSet<string> _alreadyUpdatedInstances = new HashSet<string>();
+        private VisualStudioInstance? _currentlyRunningInstance;
 
         private bool _hasCurrentlyActiveContext;
 
-        public VisualStudioInstanceFactory()
+        public VisualStudioInstanceFactory(bool leaveRunning = false)
         {
             if (Process.GetCurrentProcess().ProcessName != "devenv")
             {
                 AppDomain.CurrentDomain.AssemblyResolve += AssemblyResolveHandler;
             }
-        }
 
-        public override object InitializeLifetimeService() => null;
+            _leaveRunning = leaveRunning;
+        }
 
         // This looks like it is pointless (since we are returning an assembly that is already loaded) but it is actually required.
         // The BinaryFormatter, when invoking 'HandleReturnMessage', will end up attempting to call 'BinaryAssemblyInfo.GetAssembly()',
@@ -48,7 +47,7 @@ namespace Xunit.Harness
         // Depending on the manner in which the assembly was originally loaded, this may end up actually trying to load the assembly a second
         // time and it can fail if the standard assembly resolution logic fails. This ensures that we 'succeed' this secondary load by returning
         // the assembly that is already loaded.
-        internal static Assembly AssemblyResolveHandler(object sender, ResolveEventArgs eventArgs)
+        internal static Assembly? AssemblyResolveHandler(object sender, ResolveEventArgs eventArgs)
         {
             Debug.WriteLine($"'{eventArgs.RequestingAssembly}' is attempting to resolve '{eventArgs.Name}'");
             var resolvedAssembly = AppDomain.CurrentDomain.GetAssemblies().Where((assembly) => assembly.FullName.Equals(eventArgs.Name)).SingleOrDefault();
@@ -75,14 +74,14 @@ namespace Xunit.Harness
         /// <summary>
         /// Returns a <see cref="VisualStudioInstanceContext"/>, starting a new instance of Visual Studio if necessary.
         /// </summary>
-        public async Task<VisualStudioInstanceContext> GetNewOrUsedInstanceAsync(Version version, ImmutableList<string> extensionFiles, ImmutableHashSet<string> requiredPackageIds)
+        public async Task<VisualStudioInstanceContext> GetNewOrUsedInstanceAsync(Version version, string? rootSuffix, ImmutableList<string> extensionFiles, ImmutableHashSet<string> requiredPackageIds)
         {
             ThrowExceptionIfAlreadyHasActiveContext();
 
             bool shouldStartNewInstance = ShouldStartNewInstance(version, requiredPackageIds);
-            await UpdateCurrentlyRunningInstanceAsync(version, extensionFiles, requiredPackageIds, shouldStartNewInstance).ConfigureAwait(false);
+            await UpdateCurrentlyRunningInstanceAsync(version, rootSuffix, extensionFiles, requiredPackageIds, shouldStartNewInstance).ConfigureAwait(false);
 
-            return new VisualStudioInstanceContext(_currentlyRunningInstance, this);
+            return new VisualStudioInstanceContext(_currentlyRunningInstance!, this);
         }
 
         internal void NotifyCurrentInstanceContextDisposed(bool canReuse)
@@ -122,7 +121,7 @@ namespace Xunit.Harness
         /// <summary>
         /// Starts up a new <see cref="VisualStudioInstance"/>, shutting down any instances that are already running.
         /// </summary>
-        private async Task UpdateCurrentlyRunningInstanceAsync(Version version, ImmutableList<string> extensionFiles, ImmutableHashSet<string> requiredPackageIds, bool shouldStartNewInstance)
+        private async Task UpdateCurrentlyRunningInstanceAsync(Version version, string? rootSuffix, ImmutableList<string> extensionFiles, ImmutableHashSet<string> requiredPackageIds, bool shouldStartNewInstance)
         {
             Process hostProcess;
             DTE dte;
@@ -140,7 +139,7 @@ namespace Xunit.Harness
                 installationPath = instance.Item1;
                 actualVersion = instance.Item2;
 
-                hostProcess = await StartNewVisualStudioProcessAsync(installationPath, version, extensionFiles).ConfigureAwait(true);
+                hostProcess = await StartNewVisualStudioProcessAsync(installationPath, version, rootSuffix, extensionFiles).ConfigureAwait(true);
 
                 // We wait until the DTE instance is up before we're good
                 dte = await IntegrationHelper.WaitForNotNullAsync(() => IntegrationHelper.TryLocateDteForProcess(hostProcess)).ConfigureAwait(true);
@@ -155,7 +154,7 @@ namespace Xunit.Harness
                 // from its RCW during the previous test.
                 Debug.Assert(_currentlyRunningInstance != null, "Assertion failed: _currentlyRunningInstance != null");
 
-                hostProcess = _currentlyRunningInstance.HostProcess;
+                hostProcess = _currentlyRunningInstance!.HostProcess;
                 dte = await IntegrationHelper.WaitForNotNullAsync(() => IntegrationHelper.TryLocateDteForProcess(hostProcess)).ConfigureAwait(true);
                 actualVersion = _currentlyRunningInstance.Version;
                 supportedPackageIds = _currentlyRunningInstance.SupportedPackageIds;
@@ -229,7 +228,7 @@ namespace Xunit.Harness
                                 {
                                     continue;
                                 }
-
+                                path = path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
                                 yield return Tuple.Create(path, version);
                             }
                         }
@@ -263,6 +262,7 @@ namespace Xunit.Harness
 
         private static Tuple<string, Version, ImmutableHashSet<string>, InstanceState> LocateVisualStudioInstance(Version version, ImmutableHashSet<string> requiredPackageIds)
         {
+            //Debugger.Launch();
             var vsInstallDir = Environment.GetEnvironmentVariable("__UNITTESTEXPLORER_VSINSTALLPATH__")
                 ?? Environment.GetEnvironmentVariable("VSAPPIDDIR");
             if (vsInstallDir != null)
@@ -347,87 +347,84 @@ namespace Xunit.Harness
                                 "There were no instances of Visual Studio found that match the specified requirements.");
         }
 
-        private static async Task<Process> StartNewVisualStudioProcessAsync(string installationPath, Version version, ImmutableList<string> extensionFiles)
+        private static async Task<Process> StartNewVisualStudioProcessAsync(string installationPath, Version version, string? rootSuffix, ImmutableList<string> extensionFiles)
         {
-            if (installationPath[installationPath.Length - 1] == Path.DirectorySeparatorChar)
-            {
-                installationPath = installationPath.Substring(0, installationPath.Length - 1);
-            }
-
             var vsExeFile = Path.Combine(installationPath, @"Common7\IDE\devenv.exe");
             var vsRegEditExeFile = Path.Combine(installationPath, @"Common7\IDE\VsRegEdit.exe");
-            var key = installationPath + version;
-            if (!_alreadyUpdatedInstances.Contains(key))
+
+            var temporaryFolder = Path.Combine(Path.GetTempPath(), "vs-extension-testing", Path.GetRandomFileName());
+            Assert.False(Directory.Exists(temporaryFolder));
+            Directory.CreateDirectory(temporaryFolder);
+
+            var installerAssemblyPath = ExtractInstallerAssembly(version, temporaryFolder);
+
+            var integrationTestServiceExtension = ExtractIntegrationTestServiceExtension(temporaryFolder);
+            var extensions = extensionFiles.Add(integrationTestServiceExtension);
+
+            try
             {
-                _alreadyUpdatedInstances.Add(key);
-                var temporaryFolder = Path.Combine(Path.GetTempPath(), "vs-extension-testing", Path.GetRandomFileName());
-                Assert.False(Directory.Exists(temporaryFolder));
-                Directory.CreateDirectory(temporaryFolder);
+                var arguments = string.Join(
+                    " ",
+                    $"{rootSuffix}",
+                    $"\"{installationPath}\"",
+                    string.Join(" ", extensions.Select(extension => $"\"{extension}\"")));
 
-                var installerAssemblyPath = ExtractInstallerAssembly(version, temporaryFolder);
+                var installProcessStartInfo = CreateSilentStartInfo(installerAssemblyPath, arguments);
+                installProcessStartInfo.RedirectStandardError = true;
+                installProcessStartInfo.RedirectStandardOutput = true;
+                using var installProcess = Process.Start(installProcessStartInfo);
+                var standardErrorAsync = installProcess.StandardError.ReadToEndAsync();
+                var standardOutputAsync = installProcess.StandardOutput.ReadToEndAsync();
+                installProcess.WaitForExit();
 
-                var integrationTestServiceExtension = ExtractIntegrationTestServiceExtension(temporaryFolder);
-                var extensions = extensionFiles.Add(integrationTestServiceExtension);
-                var rootSuffix = Settings.Default.VsRootSuffix;
-
-                try
+                if (installProcess.ExitCode != 0)
                 {
-                    var arguments = string.Join(
-                        " ",
-                        string.IsNullOrEmpty(rootSuffix) ? "NoExp" : rootSuffix,
-                        $"\"{installationPath}\"",
-                        string.Join(" ", extensions.Select(extension => $"\"{extension}\"")));
-                    var installProcessStartInfo = CreateSilentStartInfo(installerAssemblyPath, arguments);
-                    installProcessStartInfo.RedirectStandardError = true;
-                    installProcessStartInfo.RedirectStandardOutput = true;
-                    using var installProcess = Process.Start(installProcessStartInfo);
-                    var standardErrorAsync = installProcess.StandardError.ReadToEndAsync();
-                    var standardOutputAsync = installProcess.StandardOutput.ReadToEndAsync();
-                    installProcess.WaitForExit();
+                    var messageBuilder = new StringBuilder();
+                    messageBuilder.AppendLine($"VSIX installer failed with exit code: {installProcess.ExitCode}");
+                    messageBuilder.AppendLine();
+                    messageBuilder.AppendLine($"Standard Error:");
+                    messageBuilder.AppendLine(await standardErrorAsync.ConfigureAwait(true));
+                    messageBuilder.AppendLine();
+                    messageBuilder.AppendLine($"Standard Output:");
+                    messageBuilder.AppendLine(await standardOutputAsync.ConfigureAwait(true));
 
-                    if (installProcess.ExitCode != 0)
-                    {
-                        var messageBuilder = new StringBuilder();
-                        messageBuilder.AppendLine($"VSIX installer failed with exit code: {installProcess.ExitCode}");
-                        messageBuilder.AppendLine();
-                        messageBuilder.AppendLine($"Standard Error:");
-                        messageBuilder.AppendLine(await standardErrorAsync.ConfigureAwait(true));
-                        messageBuilder.AppendLine();
-                        messageBuilder.AppendLine($"Standard Output:");
-                        messageBuilder.AppendLine(await standardOutputAsync.ConfigureAwait(true));
-
-                        throw new InvalidOperationException(messageBuilder.ToString());
-                    }
+                    throw new InvalidOperationException(messageBuilder.ToString());
                 }
-                finally
-                {
-                    File.Delete(integrationTestServiceExtension);
-                    Directory.Delete(temporaryFolder, recursive: true);
-                }
-
-                if (version.Major >= 16)
-                {
-                    // Make sure the start window doesn't show on launch
-                    Process.Start(CreateSilentStartInfo(vsRegEditExeFile, $"set \"{installationPath}\" {Settings.Default.VsRootSuffix} HKCU General OnEnvironmentStartup dword 10")).WaitForExit();
-                }
-
-                // BUG: Currently building with /p:DeployExtension=true does not always cause the MEF cache to recompose...
-                //      So, run clearcache and updateconfiguration to workaround https://devdiv.visualstudio.com/DevDiv/_workitems?id=385351.
-                if (version.Major >= 12)
-                {
-                    Process.Start(CreateSilentStartInfo(vsExeFile, $"/clearcache {VsLaunchArgs}")).WaitForExit();
-                }
-
-                Process.Start(CreateSilentStartInfo(vsExeFile, $"/updateconfiguration {VsLaunchArgs}")).WaitForExit();
-                Process.Start(CreateSilentStartInfo(vsExeFile, $"/resetsettings General.vssettings /command \"File.Exit\" {VsLaunchArgs}")).WaitForExit();
-
-                // Make sure we kill any leftover processes spawned by the host
-                IntegrationHelper.KillProcess("DbgCLR");
-                IntegrationHelper.KillProcess("VsJITDebugger");
-                IntegrationHelper.KillProcess("dexplore");
+            }
+            finally
+            {
+                File.Delete(integrationTestServiceExtension);
+                Directory.Delete(temporaryFolder, recursive: true);
             }
 
-            var process = Process.Start(vsExeFile, VsLaunchArgs);
+            if (version.Major >= 16)
+            {
+                // Make sure the start window doesn't show on launch
+                Process.Start(CreateSilentStartInfo(vsRegEditExeFile, $"set \"{installationPath}\" \"{rootSuffix}\" HKCU General OnEnvironmentStartup dword 10")).WaitForExit();
+            }
+
+            var vsLaunchArgs = string.Empty;
+            if (!string.IsNullOrWhiteSpace(rootSuffix))
+            {
+                vsLaunchArgs += $"/rootsuffix \"{rootSuffix}\"";
+            }
+
+            // BUG: Currently building with /p:DeployExtension=true does not always cause the MEF cache to recompose...
+            //      So, run clearcache and updateconfiguration to workaround https://devdiv.visualstudio.com/DevDiv/_workitems?id=385351.
+            if (version.Major >= 12)
+            {
+                Process.Start(CreateSilentStartInfo(vsExeFile, $"/clearcache {vsLaunchArgs}")).WaitForExit();
+            }
+
+            Process.Start(CreateSilentStartInfo(vsExeFile, $"/updateconfiguration {vsLaunchArgs}")).WaitForExit();
+            Process.Start(CreateSilentStartInfo(vsExeFile, $"/resetsettings General.vssettings /command \"File.Exit\" {vsLaunchArgs}")).WaitForExit();
+
+            // Make sure we kill any leftover processes spawned by the host
+            IntegrationHelper.KillProcess("DbgCLR");
+            IntegrationHelper.KillProcess("VsJITDebugger");
+            IntegrationHelper.KillProcess("dexplore");
+
+            var process = Process.Start(vsExeFile, vsLaunchArgs);
             Debug.WriteLine($"Launched a new instance of Visual Studio. (ID: {process.Id})");
 
             return process;
@@ -469,13 +466,23 @@ namespace Xunit.Harness
 
         public void Dispose()
         {
-            _currentlyRunningInstance?.Close();
+            if (!_leaveRunning)
+            {
+                _currentlyRunningInstance?.Close();
+            }
+
             _currentlyRunningInstance = null;
 
             // We want to make sure everybody cleaned up their contexts by the end of everything
             ThrowExceptionIfAlreadyHasActiveContext();
 
             AppDomain.CurrentDomain.AssemblyResolve -= AssemblyResolveHandler;
+        }
+
+        // The life of this object is managed explicitly
+        public override object? InitializeLifetimeService()
+        {
+            return null;
         }
     }
 }
