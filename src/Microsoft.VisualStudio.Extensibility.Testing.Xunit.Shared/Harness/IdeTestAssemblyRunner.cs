@@ -271,6 +271,7 @@ namespace Xunit.Harness
                     foreach (var testCase in testCases)
                     {
                         var retry = false;
+                        var timeoutRetryCount = 0;
                         do
                         {
                             retry = false;
@@ -295,7 +296,11 @@ namespace Xunit.Harness
                                         var taskTimeout = Task.Delay(60000);
                                         if (await Task.WhenAny(taskTest, taskTimeout).ConfigureAwait(true) != taskTest)
                                         {
-                                            needRestart = true;
+                                            timeoutRetryCount++;
+                                            if (timeoutRetryCount < 3)
+                                            {
+                                                needRestart = true;
+                                            }
                                         }
                                     }
                                 }
@@ -492,6 +497,18 @@ namespace Xunit.Harness
                     CurrentTestCase = DataCollectionService.GetTestName(testCaseStarting.TestCase);
                     return _messageSink.OnMessage(message);
                 }
+                else if (message is ITestFailed failed)
+                {
+                    var messages = failed.Messages;
+                    var output = failed.Output;
+                    var stackTraces = failed.StackTraces;
+                    var exceptions = failed.ExceptionTypes;
+                    if (messages?.Any(x => x.Contains("IPC")) == true || output?.Contains("IPC") == true || exceptions?.Any(x => x.Contains("IPC")) == true)
+                    {
+                        IPCChannelFail = true;
+                        return true;
+                    }
+                }                
                 else if (message is ITestCaseFinished testCaseFinished)
                 {
                     CurrentTestCase = null;
@@ -513,6 +530,7 @@ namespace Xunit.Harness
 
                     return !_cancellationToken.IsCancellationRequested;
                 }
+                
                 else if (!_finalAttempt && message is ITestFailed testFailed)
                 {
                     // This test will run again; report it as skipped instead of failed
@@ -523,18 +541,7 @@ namespace Xunit.Harness
                 {
                     return !_cancellationToken.IsCancellationRequested;
                 }
-                else if (message is ITestFailed failed)
-                {
-                    var messages = failed.Messages;
-                    var output = failed.Output;
-                    var stackTraces = failed.StackTraces;
-                    var exceptions = failed.ExceptionTypes;
-                    if (messages?.Any(x => x.Contains("IPC")) == true || output?.Contains("IPC") == true || exceptions?.Any(x => x.Contains("IPC")) == true)
-                    {
-                        IPCChannelFail = true;
-                        return true;
-                    }
-                }
+                
                 return _messageSink.OnMessage(message);
             }
             public void ResetIPCChannelFail() => IPCChannelFail = false;
