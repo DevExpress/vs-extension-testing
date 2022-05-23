@@ -263,33 +263,86 @@ namespace Xunit.Harness
                 try
                 {
                     var finalAttempt = currentAttempt == visualStudioInstanceKey.MaxAttempts - 1;
-                    var knownTestCasesByUniqueId = testCases.ToDictionary<IXunitTestCase, string, ITestCase>(testCase => testCase.UniqueID, testCase => testCase);
+                    var knownTestCasesByUniqueId = testCases.ToDictionary(testCase => testCase.UniqueID, (Func<IXunitTestCase, ITestCase>)(testCase => testCase));
                     executionMessageSinkFilter = new IpcMessageSink(ExecutionMessageSink, knownTestCasesByUniqueId, finalAttempt, completedTestCaseIds, cancellationTokenSource.Token);
-                    marshalledObjects.Add(executionMessageSinkFilter);
-
-                    // Install a COM message filter to handle retry operations when the first attempt fails
-                    using (var messageFilter = new MessageFilter())
-                    using (var visualStudioContext = await visualStudioInstanceFactory.GetNewOrUsedInstanceAsync(GetVersion(visualStudioInstanceKey.Version), visualStudioInstanceKey.RootSuffix, GetExtensionFiles(testCases), ImmutableHashSet.Create<string>()).ConfigureAwait(true))
+                    var diagnosticMessageSink = new IpcMessageSink(DiagnosticMessageSink, knownTestCasesByUniqueId, finalAttempt, new HashSet<string>(), cancellationTokenSource.Token);
+                    var runSummary = new RunSummary();
+                    VisualStudioInstanceContext visualStudioContext = null;
+                    foreach (var testCase in testCases)
                     {
-                        using (var runner = visualStudioContext.Instance.TestInvoker.CreateTestAssemblyRunner(new IpcTestAssembly(TestAssembly), testCases.ToArray(), new IpcMessageSink(DiagnosticMessageSink, knownTestCasesByUniqueId, finalAttempt, new HashSet<string>(), cancellationTokenSource.Token), executionMessageSinkFilter, ExecutionOptions))
+                        var retry = false;
+                        do
                         {
-                            marshalledObjects.Add(runner);
-
-                            var ipcMessageBus = new IpcMessageBus(messageBus);
-                            marshalledObjects.Add(ipcMessageBus);
-
-                            var result = runner.RunTestCollection();
-                            var runSummary = new RunSummary
+                            retry = false;
+                            if (visualStudioContext == null)
                             {
-                                Total = result.Item1,
-                                Failed = result.Item2,
-                                Skipped = result.Item3,
-                                Time = result.Item4,
-                            };
+                                visualStudioContext = await visualStudioInstanceFactory.GetNewOrUsedInstanceAsync(GetVersion(visualStudioInstanceKey.Version), visualStudioInstanceKey.RootSuffix, GetExtensionFiles(testCases), ImmutableHashSet.Create<string>()).ConfigureAwait(true);
+                            }
 
-                            return Tuple.Create(runSummary, executionMessageSinkFilter.TestAssemblyFinished);
+                            Tuple<int, int, int, decimal> result = null;
+                            var needRestart = false;
+                            try
+                            {
+                                using (var runner = visualStudioContext.Instance.TestInvoker.CreateTestAssemblyRunner(new IpcTestAssembly(TestAssembly), new[] { testCase }, diagnosticMessageSink, executionMessageSinkFilter, ExecutionOptions))
+                                {
+                                    var taskTest = Task.Run(() => result = runner.RunTestCollection());
+                                    if (Debugger.IsAttached)
+                                    {
+                                        await taskTest.ConfigureAwait(true);
+                                    }
+                                    else
+                                    {
+                                        var taskTimeout = Task.Delay(60000);
+                                        if (await Task.WhenAny(taskTest, taskTimeout).ConfigureAwait(true) != taskTest)
+                                        {
+                                            needRestart = true;
+                                        }
+                                    }
+                                }
+                            }
+                            catch (System.Runtime.Remoting.RemotingException)
+                            {
+                                needRestart = true;
+                            }
+                            catch (System.InvalidOperationException ex)
+                            {
+                                if (ex?.Message == "Failed to set the foreground window.")
+                                {
+                                    needRestart = true;
+                                }
+                            }
+                            
+                            if (needRestart || executionMessageSinkFilter.IPCChannelFail || diagnosticMessageSink.IPCChannelFail)
+                            {
+                                executionMessageSinkFilter.ResetIPCChannelFail();
+                                diagnosticMessageSink.ResetIPCChannelFail();
+                                try
+                                {
+                                    visualStudioContext.Instance.Close();
+                                }
+                                catch { }
+                                try
+                                {
+                                    visualStudioContext.Dispose();
+                                }
+                                catch { }
+                                visualStudioContext = null;
+                                retry = true;
+                            }
+                            else
+                            {
+                                runSummary.Total += result.Item1;
+                                runSummary.Failed += result.Item2;
+                                runSummary.Skipped = result.Item3;
+                                runSummary.Time += result.Item4;
+                            }
                         }
+                        while (retry);
                     }
+
+                    visualStudioContext?.Dispose();
+
+                    return Tuple.Create(runSummary, executionMessageSinkFilter.TestAssemblyFinished);
                 }
                 catch (Exception e)
                 {
@@ -386,7 +439,7 @@ namespace Xunit.Harness
                 _completedTestCaseIds = completedTestCaseIds;
                 _cancellationToken = cancellationToken;
             }
-
+            public bool IPCChannelFail { get; private set; }
             public string? CurrentTestCase
             {
                 get;
@@ -470,10 +523,21 @@ namespace Xunit.Harness
                 {
                     return !_cancellationToken.IsCancellationRequested;
                 }
-
+                else if (message is ITestFailed failed)
+                {
+                    var messages = failed.Messages;
+                    var output = failed.Output;
+                    var stackTraces = failed.StackTraces;
+                    var exceptions = failed.ExceptionTypes;
+                    if (messages?.Any(x => x.Contains("IPC")) == true || output?.Contains("IPC") == true || exceptions?.Any(x => x.Contains("IPC")) == true)
+                    {
+                        IPCChannelFail = true;
+                        return true;
+                    }
+                }
                 return _messageSink.OnMessage(message);
             }
-
+            public void ResetIPCChannelFail() => IPCChannelFail = false;
             // The life of this object is managed explicitly
             public override object? InitializeLifetimeService()
             {
