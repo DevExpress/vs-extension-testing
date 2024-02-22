@@ -18,6 +18,11 @@ namespace Microsoft.VisualStudio.VsixInstaller
     {
         public static void Main(string[] args)
         {
+            if (args is null)
+            {
+                throw new ArgumentNullException(nameof(args));
+            }
+
             var rootSuffix = args[0];
             if (rootSuffix == "NoExp")
             {
@@ -104,6 +109,7 @@ namespace Microsoft.VisualStudio.VsixInstaller
             using (settingsManager)
             {
                 var extensionManager = new ExtensionManagerService(settingsManager);
+                using var disposableExtensionManager = (object)extensionManager as IDisposable;
                 IVsExtensionManager vsExtensionManager = (IVsExtensionManager)(object)extensionManager;
                 var extensions = vsixFiles.Select(vsExtensionManager.CreateInstallableExtension).ToArray();
 
@@ -133,6 +139,15 @@ namespace Microsoft.VisualStudio.VsixInstaller
                         catch { }
                     }
                 }
+            }
+
+            // Install updated versions of extensions
+            using (var settingsManager = ExternalSettingsManager.CreateForApplication(vsExeFile, rootSuffix))
+            {
+                var extensionManager = new ExtensionManagerService(settingsManager);
+                using var disposableExtensionManager = (object)extensionManager as IDisposable;
+                IVsExtensionManager vsExtensionManager = (IVsExtensionManager)(object)extensionManager;
+                var extensions = vsixFiles.Select(vsExtensionManager.CreateInstallableExtension).ToArray();
 
                 foreach (var extension in extensions)
                 {
